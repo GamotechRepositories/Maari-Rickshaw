@@ -326,13 +326,9 @@ export default function RikshaCanvas({
     const x = lastVehicleRef.current.x || fallbackX;
     const y = lastVehicleRef.current.y || fallbackY;
     const s = sceneScale;
-    const stoneX = x + Math.max(70, 96 * s);
-    const stoneY = y + 8 * s;
-    // Contact = front of bike against left face of boulder
-    const contactX = stoneX - 52 * s;
 
     crash.seeded = true;
-    crash.hitBurst = false;
+    crash.hitBurst = true;
     crash.t0 = performance.now();
     crash.lastTs = crash.t0;
     crash.x = x;
@@ -340,80 +336,47 @@ export default function RikshaCanvas({
     crash.mult = mult;
     crash.particles = [];
     crash.sparks = [];
-    crash.shards = [];
     crash.dust = [];
+    crash.smoke = [];
     crash.rocks = [];
-    // Simple rigid-body-ish sim: run into rock → stop → tip over → scrape on asphalt
+
+    // Detach rear & front wheels right at their current axle positions and roll them away
+    crash.shards = [
+      {
+        kind: 'wheel',
+        x: x - 62 * s,
+        y: y + 8 * s,
+        vx: -2.8 * s,
+        vy: -4.2 * s,
+        rot: 0,
+        vr: -0.16,
+        r: 21 * s,
+        life: 6.0
+      },
+      {
+        kind: 'wheel',
+        x: x + 92 * s,
+        y: y + 8 * s,
+        vx: 5.2 * s,
+        vy: -5.4 * s,
+        rot: 0,
+        vr: 0.24,
+        r: 20 * s,
+        life: 6.0
+      }
+    ];
+
+    // Wheelless rickshaw body drops onto the asphalt and skids to a stop
     crash.phys = {
       x,
       y,
-      vx: Math.max(420, 520 * s), // px/s toward stone
+      vx: Math.max(120, 180 * s),
       vy: 0,
-      rot: -0.06,
-      vr: 0,
-      squash: 1,
-      groundY: y + 6 * s,
-      stoneX,
-      stoneY,
-      contactX,
-      phase: 'run', // run | crush | tip | slide
-      hitAt: 0,
-      scrapeDust: 0
+      rot: 0,
+      groundY: y + 20 * s,
+      phase: 'drop',
+      hitAt: crash.t0
     };
-  };
-
-  const burstImpactDebris = (crash, stoneX, stoneY, sceneScale) => {
-    if (crash.hitBurst) return;
-    crash.hitBurst = true;
-    const s = sceneScale;
-    const cx = stoneX - 40 * s;
-    const cy = stoneY - 6 * s;
-
-    crash.dust = Array.from({ length: 18 }).map(() => {
-      const ang = -Math.PI + Math.random() * Math.PI;
-      const spd = (0.8 + Math.random() * 3.2) * s;
-      return {
-        x: cx + (Math.random() - 0.5) * 16 * s,
-        y: cy,
-        vx: Math.cos(ang) * spd,
-        vy: Math.sin(ang) * spd - 0.8 * s,
-        life: 0.9 + Math.random() * 0.8,
-        size: (8 + Math.random() * 16) * s,
-        color: Math.random() > 0.5 ? 'rgba(110,100,85,0.5)' : 'rgba(70,65,55,0.45)'
-      };
-    });
-
-    crash.rocks = Array.from({ length: 12 }).map(() => {
-      const ang = -Math.PI * 0.85 + Math.random() * Math.PI * 0.7;
-      const spd = (2 + Math.random() * 6) * s;
-      return {
-        x: cx,
-        y: cy - 8 * s,
-        vx: Math.cos(ang) * spd,
-        vy: Math.sin(ang) * spd - 1.5 * s,
-        rot: Math.random() * Math.PI,
-        vr: (Math.random() - 0.5) * 0.35,
-        size: (2.5 + Math.random() * 7) * s,
-        life: 0.9 + Math.random() * 0.6,
-        color: Math.random() > 0.5 ? '#6b7280' : '#4b5563'
-      };
-    });
-
-    crash.sparks = Array.from({ length: 14 }).map(() => {
-      const ang = -Math.PI * 0.15 - Math.random() * Math.PI * 0.55;
-      const spd = (4 + Math.random() * 9) * s;
-      return {
-        x: cx,
-        y: cy + 4 * s,
-        vx: Math.cos(ang) * spd,
-        vy: Math.sin(ang) * spd,
-        life: 0.15 + Math.random() * 0.3,
-        len: (4 + Math.random() * 10) * s
-      };
-    });
-
-    crash.shards = [];
-    crash.particles = [];
   };
 
   const stepCrashPhysics = (crash, sceneScale, now) => {
@@ -423,150 +386,46 @@ export default function RikshaCanvas({
     crash.lastTs = now;
     const s = sceneScale;
 
-    // Sprite is a seated rider — never rotate near 90° (looks like standing on the nose).
-    // Final rest = low crumple against the stone (~20–35° lean).
-    const REST_ROT = 0.42;
+    // Body drops onto road without wheels and skids to rest
+    p.x += p.vx * dt;
+    p.vx *= Math.pow(0.06, dt);
+    if (Math.abs(p.vx) < 4 * s) p.vx = 0;
 
-    if (p.phase === 'run') {
-      p.x += p.vx * dt;
-      p.y = crash.y + Math.sin(now * 0.05) * 0.8 * s;
-      p.rot = -0.04 - Math.min(0.1, (p.x - crash.x) / (220 * s));
-      if (p.x >= p.contactX) {
-        p.x = p.contactX;
-        p.phase = 'crush';
-        p.hitAt = now;
-        p.vx = -70 * s;
-        p.vy = -40 * s; // tiny hop only — stay near asphalt
-        p.vr = 2.2; // pitch into stone, not a vertical endo
-        p.squash = 0.82;
-        burstImpactDebris(crash, p.stoneX, p.stoneY, sceneScale);
-      }
-      return;
-    }
-
-    if (p.phase === 'crush') {
-      const age = (now - p.hitAt) / 1000;
-      p.squash = 0.82 + Math.min(0.18, age * 2.5);
-      p.x += p.vx * dt;
+    if (p.y < p.groundY) {
+      p.vy += 950 * s * dt;
       p.y += p.vy * dt;
-      p.vy += 1100 * s * dt;
-      p.vx *= 0.88;
-      p.rot += p.vr * dt;
-      p.vr *= 0.94;
-      // Cap so we never go vertical
-      if (p.rot > 0.55) p.rot = 0.55;
-      if (p.rot < -0.35) p.rot = -0.35;
-      if (p.y > p.groundY) {
+      if (p.y >= p.groundY) {
         p.y = p.groundY;
-        p.vy = 0;
+        p.vy = -p.vy * 0.18;
+        if (Math.abs(p.vy) < 15 * s) p.vy = 0;
+        // Small asphalt scrape dust when chassis hits the road
+        for (let i = 0; i < 8; i++) {
+          crash.dust.push({
+            x: p.x + (Math.random() - 0.5) * 90 * s,
+            y: p.groundY + 14 * s,
+            vx: (Math.random() - 0.5) * 2.2 * s,
+            vy: (-0.4 - Math.random() * 0.8) * s,
+            life: 0.6 + Math.random() * 0.4,
+            size: (7 + Math.random() * 9) * s,
+            color: 'rgba(110,105,95,0.45)'
+          });
+        }
       }
-      if (age > 0.12) {
-        p.phase = 'settle';
-        p.vx = -25 * s;
-        p.vr = (REST_ROT - p.rot) * 3;
-        p.squash = 1;
-        p.scrapeDust = 1;
-      }
-      return;
     }
 
-    // settle — ease into crumpled lean against the rock, low on the road
-    {
-      p.x += p.vx * dt;
-      p.vx *= Math.pow(0.08, dt);
-      p.rot += (REST_ROT - p.rot) * Math.min(1, 6 * dt);
-      p.vr *= 0.85;
-      // Sink slightly so wheels/body read as on asphalt
-      const sink = Math.min(1, (now - p.hitAt) / 1000);
-      p.y = p.groundY + 4 * s + sink * 6 * s;
-      // Keep pressed near stone face
-      const minX = p.contactX - 18 * s;
-      const maxX = p.contactX + 6 * s;
-      if (p.x < minX) p.x = minX;
-      if (p.x > maxX) p.x = maxX;
-      p.scrapeDust = Math.min(1, Math.abs(p.vx) / (30 * s));
-      if (Math.abs(p.vx) < 3 * s) p.vx = 0;
+    // Subtle forward nose-dip tilt since front/rear wheels fell off
+    p.rot += (0.07 - p.rot) * Math.min(1, 7 * dt);
+
+    // Subtle sparks while chassis skids on asphalt
+    if (p.vx > 25 * s && Math.random() > 0.45) {
+      crash.sparks.push({
+        x: p.x + (Math.random() - 0.3) * 70 * s,
+        y: p.groundY + 14 * s,
+        vx: -1.5 * s - Math.random() * 2.5 * s,
+        vy: (-1.0 - Math.random() * 1.8) * s,
+        life: 0.2 + Math.random() * 0.2
+      });
     }
-  };
-
-  /** Low, heavy roadside boulder — planted, not floating */
-  const drawCrashStone = (ctx, stoneX, stoneY, sceneScale, impact = 0) => {
-    const s = sceneScale;
-    const shake = impact > 0.05 ? Math.sin(impact * 70) * 4 * s * impact : 0;
-    const sx = stoneX + shake;
-    const sy = stoneY;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.ellipse(sx, sy + 20 * s, 70 * s, 14 * s, 0, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fill();
-    ctx.restore();
-
-    // Wider / lower rock (looks like it sits ON the road)
-    const pts = [
-      [-62, 18], [-58, -2], [-42, -28], [-16, -44],
-      [10, -50], [36, -42], [56, -22], [66, 2],
-      [60, 22], [28, 30], [-8, 32], [-44, 26]
-    ];
-
-    ctx.save();
-    ctx.translate(sx, sy);
-    ctx.scale(s, s);
-
-    const grad = ctx.createLinearGradient(-60, -50, 40, 30);
-    grad.addColorStop(0, '#a8a29e');
-    grad.addColorStop(0.4, '#78716c');
-    grad.addColorStop(0.75, '#57534e');
-    grad.addColorStop(1, '#292524');
-    ctx.beginPath();
-    pts.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
-    ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(28,25,23,0.95)';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(-20, -30);
-    ctx.lineTo(6, -46);
-    ctx.lineTo(30, -34);
-    ctx.lineTo(10, -14);
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(231,229,228,0.28)';
-    ctx.fill();
-
-    // Hit face
-    ctx.beginPath();
-    ctx.moveTo(-62, 12);
-    ctx.lineTo(-50, -14);
-    ctx.lineTo(-22, -20);
-    ctx.lineTo(-30, 20);
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(0,0,0,0.28)';
-    ctx.fill();
-
-    ctx.strokeStyle = 'rgba(28,25,23,0.6)';
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.moveTo(-4, -44);
-    ctx.lineTo(2, -6);
-    ctx.lineTo(18, 16);
-    ctx.moveTo(2, -6);
-    ctx.lineTo(-24, 8);
-    ctx.stroke();
-
-    if (impact > 0.2) {
-      ctx.strokeStyle = `rgba(255, 236, 200, ${0.65 * impact})`;
-      ctx.lineWidth = 2.4;
-      ctx.beginPath();
-      ctx.moveTo(-50, 0);
-      ctx.lineTo(-32, 8);
-      ctx.stroke();
-    }
-
-    ctx.restore();
   };
 
   const drawCrashSequence = (ctx, width, height, roadTop, sceneScale, mult) => {
@@ -577,65 +436,33 @@ export default function RikshaCanvas({
     const p = crash.phys;
     if (!p) return;
 
-    const hitAge = p.phase === 'run' ? 0 : Math.max(0, (now - p.hitAt) / 1000);
-    const hardHit = p.phase === 'run' ? 0 : Math.exp(-hitAge * 9);
-
-    let camX = 0;
-    let camY = 0;
-    if (hardHit > 0.04) {
-      camX = (Math.random() - 0.5) * 16 * sceneScale * hardHit;
-      camY = (Math.random() - 0.5) * 10 * sceneScale * hardHit;
-    }
+    const camAge = Math.max(0, elapsed);
+    const hitShake = camAge < 0.25 ? (1 - camAge / 0.25) : 0;
+    const camX = hitShake > 0 ? (Math.random() - 0.5) * 8 * sceneScale * hitShake : 0;
+    const camY = hitShake > 0 ? (Math.random() - 0.5) * 6 * sceneScale * hitShake : 0;
 
     ctx.save();
     ctx.translate(camX, camY);
 
     drawAviatorSpeedCurve(ctx, width, height, roadTop, crash.x, crash.y, crash.mult || mult, sceneScale);
 
-    // Skid growing toward contact
-    const skidEnd = Math.min(p.x, p.contactX);
+    // Skid mark where the wheelless chassis scraped along the road
     ctx.save();
-    ctx.globalAlpha = 0.75;
+    ctx.globalAlpha = 0.5;
     ctx.strokeStyle = '#111';
-    ctx.lineWidth = Math.max(2.2, 3.6 * sceneScale);
+    ctx.lineWidth = Math.max(2, 3 * sceneScale);
     ctx.lineCap = 'round';
-    [-6, 5].forEach((oy) => {
-      ctx.beginPath();
-      ctx.moveTo(crash.x - 36 * sceneScale, crash.y + (14 + oy) * sceneScale * 0.15 + 12 * sceneScale);
-      ctx.lineTo(skidEnd - 8 * sceneScale, p.groundY + 14 * sceneScale + oy * 0.4);
-      ctx.stroke();
-    });
-    // Post-hit scrape mark
-    if (p.phase === 'settle') {
-      ctx.globalAlpha = 0.55;
-      ctx.beginPath();
-      ctx.moveTo(p.contactX - 10 * sceneScale, p.groundY + 16 * sceneScale);
-      ctx.lineTo(p.x, p.groundY + 18 * sceneScale);
-      ctx.stroke();
-    }
+    ctx.beginPath();
+    ctx.moveTo(crash.x - 20 * sceneScale, p.groundY + 14 * sceneScale);
+    ctx.lineTo(p.x + 20 * sceneScale, p.groundY + 14 * sceneScale);
+    ctx.stroke();
     ctx.restore();
-
-    // Stone first (bike hits INTO it) — always full size, planted
-    drawCrashStone(ctx, p.stoneX, p.stoneY, sceneScale, hardHit);
-
-    // Continuous scrape dust while sliding
-    if (p.phase === 'settle' && p.scrapeDust > 0.15 && Math.random() > 0.55) {
-      crash.dust.push({
-        x: p.x - 10 * sceneScale,
-        y: p.groundY + 8 * sceneScale,
-        vx: (-0.5 - Math.random()) * sceneScale,
-        vy: (-0.4 - Math.random() * 0.8) * sceneScale,
-        life: 0.5 + Math.random() * 0.4,
-        size: (6 + Math.random() * 10) * sceneScale,
-        color: 'rgba(90,85,75,0.4)'
-      });
-    }
 
     const crashBike = bikeImgRef.current;
     if (crashBike && crashBike.complete && crashBike.naturalWidth) {
       const aspect = crashBike.naturalWidth / Math.max(1, crashBike.naturalHeight);
-      const maxH = Math.max(105, 190 * sceneScale);
-      const maxW = Math.max(165, 285 * sceneScale);
+      const maxH = Math.max(115, 210 * sceneScale);
+      const maxW = Math.max(175, 310 * sceneScale);
       let bikeHeight = maxH;
       let bikeWidth = bikeHeight * aspect;
       if (bikeWidth > maxW) {
@@ -643,49 +470,40 @@ export default function RikshaCanvas({
         bikeHeight = bikeWidth / aspect;
       }
 
-      // Contact shadow on road
+      // Contact shadow directly under wheelless body
       ctx.save();
       ctx.beginPath();
       ctx.ellipse(
-        p.x,
-        p.groundY + 16 * sceneScale,
-        bikeWidth * 0.38,
-        Math.max(3, 5 * sceneScale) * (p.phase === 'settle' ? 1.25 : 1),
+        p.x + bikeWidth * 0.04,
+        p.groundY + 18 * sceneScale,
+        bikeWidth * 0.40,
+        Math.max(3, 5 * sceneScale),
         0, 0, Math.PI * 2
       );
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
       ctx.fill();
       ctx.restore();
 
+      // Draw wheelless rickshaw body dropped onto the road (no wheels attached)
       ctx.save();
-      ctx.translate(p.x, p.y - bikeHeight * 0.16);
+      ctx.translate(p.x, p.y - bikeHeight * 0.28);
       ctx.rotate(p.rot);
-      ctx.scale(1, p.squash);
-      drawRikshaWheels(ctx, bikeWidth, bikeHeight, 0);
       ctx.drawImage(crashBike, -bikeWidth / 2, -bikeHeight / 2, bikeWidth, bikeHeight);
       drawRikshaHead(ctx, bikeWidth, bikeHeight, 'CRASHED', multiplier);
       drawRikshaSign(ctx, bikeWidth, bikeHeight, 'CRASHED');
       ctx.restore();
     }
 
-    // Subtle impact flash only (no full-screen cartoon blast)
-    if (hardHit > 0.25) {
-      ctx.save();
-      ctx.fillStyle = `rgba(255,255,255,${0.22 * hardHit})`;
-      ctx.fillRect(-camX, -camY, width, height);
-      ctx.restore();
-    }
-
     (crash.dust || []).forEach((d) => {
       d.x += d.vx;
       d.y += d.vy;
-      d.vx *= 0.97;
-      d.vy *= 0.98;
-      d.life -= 0.012;
+      d.vx *= 0.96;
+      d.vy *= 0.96;
+      d.life -= 0.015;
       d.size *= 1.01;
       if (d.life <= 0) return;
       ctx.save();
-      ctx.globalAlpha = Math.max(0, Math.min(0.45, d.life * 0.45));
+      ctx.globalAlpha = Math.max(0, Math.min(0.42, d.life * 0.42));
       ctx.fillStyle = d.color;
       ctx.beginPath();
       ctx.ellipse(d.x, d.y, d.size, d.size * 0.6, 0, 0, Math.PI * 2);
@@ -693,33 +511,11 @@ export default function RikshaCanvas({
       ctx.restore();
     });
 
-    (crash.rocks || []).forEach((r) => {
-      r.x += r.vx;
-      r.y += r.vy;
-      r.vy += 0.28 * sceneScale;
-      r.rot += r.vr;
-      r.life -= 0.012;
-      if (r.life <= 0) return;
-      // settle on road
-      if (r.y > p.groundY + 18 * sceneScale) {
-        r.y = p.groundY + 18 * sceneScale;
-        r.vy *= -0.2;
-        r.vx *= 0.7;
-      }
-      ctx.save();
-      ctx.globalAlpha = Math.max(0, Math.min(1, r.life));
-      ctx.translate(r.x, r.y);
-      ctx.rotate(r.rot);
-      ctx.fillStyle = r.color;
-      ctx.fillRect(-r.size / 2, -r.size / 2, r.size, r.size * 0.65);
-      ctx.restore();
-    });
-
     (crash.sparks || []).forEach((sp) => {
       sp.x += sp.vx;
       sp.y += sp.vy;
-      sp.vy += 0.25 * sceneScale;
-      sp.life -= 0.028;
+      sp.vy += 0.22 * sceneScale;
+      sp.life -= 0.03;
       if (sp.life <= 0) return;
       ctx.save();
       ctx.globalAlpha = Math.max(0, sp.life);
@@ -728,25 +524,39 @@ export default function RikshaCanvas({
       ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(sp.x, sp.y);
-      ctx.lineTo(sp.x - sp.vx * 1.3, sp.y - sp.vy * 1.3);
+      ctx.lineTo(sp.x - sp.vx * 1.2, sp.y - sp.vy * 1.2);
       ctx.stroke();
       ctx.restore();
     });
 
-    ctx.restore();
+    // Detached rolling & bouncing wheels
+    const wImg = wheelImgRef.current;
+    (crash.shards || []).forEach((sh) => {
+      sh.x += sh.vx;
+      sh.y += sh.vy;
+      sh.vy += 0.34 * sceneScale;
+      sh.vx *= 0.992;
+      sh.rot += sh.vr;
+      sh.vr *= 0.992;
+      sh.life -= 0.004;
+      if (sh.life <= 0) return;
+      const floorY = p.groundY - 4 * sceneScale;
+      if (sh.y > floorY) {
+        sh.y = floorY;
+        sh.vy *= -0.45;
+        if (Math.abs(sh.vy) < 0.8 * sceneScale) sh.vy = 0;
+      }
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(1, sh.life));
+      ctx.translate(sh.x, sh.y);
+      ctx.rotate(sh.rot);
+      if (sh.kind === 'wheel' && wImg && wImg.complete && wImg.naturalWidth) {
+        ctx.drawImage(wImg, -sh.r, -sh.r, sh.r * 2, sh.r * 2);
+      }
+      ctx.restore();
+    });
 
-    // Soft vignette — short
-    if (elapsed < 0.9) {
-      const v = Math.max(0, 1 - elapsed / 0.9) * 0.28;
-      const vig = ctx.createRadialGradient(
-        width * 0.5, height * 0.45, Math.min(width, height) * 0.22,
-        width * 0.5, height * 0.45, Math.max(width, height) * 0.8
-      );
-      vig.addColorStop(0, 'rgba(0,0,0,0)');
-      vig.addColorStop(1, `rgba(40, 8, 0, ${v})`);
-      ctx.fillStyle = vig;
-      ctx.fillRect(0, 0, width, height);
-    }
+    ctx.restore();
   };
 
   // Smooth road-speed trail behind the bike (subtle, not neon scribble)
@@ -853,6 +663,65 @@ export default function RikshaCanvas({
     });
   };
 
+  // Draw 5-pointed cartoon star
+  const drawStar5 = (ctx, x, y, outerR, innerR, rot, color) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? outerR : innerR;
+      const a = -Math.PI / 2 + (i * Math.PI) / 5;
+      if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+      else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+  };
+
+  // Draw cartoon tilted orbit rings + orbiting red & white 5-point dizzy stars above head
+  const drawDizzyStars = (ctx, cx, cy, spanW, t) => {
+    const rx = spanW * 0.85;
+    const ry = spanW * 0.22;
+
+    const rings = [
+      { tilt: -0.10, scaleX: 1.00, scaleY: 1.00, color: 'rgba(245, 158, 11, 0.85)', lw: 1.2 },
+      { tilt:  0.11, scaleX: 0.96, scaleY: 0.88, color: 'rgba(255, 255, 255, 0.92)', lw: 1.2 },
+      { tilt:  0.01, scaleX: 0.92, scaleY: 0.78, color: 'rgba(251, 191, 36, 0.70)', lw: 1.0 }
+    ];
+
+    rings.forEach((ring) => {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(ring.tilt);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, rx * ring.scaleX, ry * ring.scaleY, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = ring.color;
+      ctx.lineWidth = Math.max(0.9, ring.lw);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    const stars = [
+      { phase: 0.4, speed: 0.0048, tilt: 0.08, r: spanW * 0.14, color: '#ff3b1f' },
+      { phase: 2.3, speed: 0.0048, tilt: -0.08, r: spanW * 0.13, color: '#ffffff' },
+      { phase: 4.5, speed: 0.0048, tilt: 0.02, r: spanW * 0.085, color: '#ffffff' }
+    ];
+
+    stars.forEach((st) => {
+      const a = t * st.speed + st.phase;
+      const lx = Math.cos(a) * rx * 0.85;
+      const ly = Math.sin(a) * ry * 0.95;
+      const cosT = Math.cos(st.tilt);
+      const sinT = Math.sin(st.tilt);
+      const sx = cx + lx * cosT - ly * sinT;
+      const sy = cy + lx * sinT + ly * cosT;
+      drawStar5(ctx, sx, sy, st.r, st.r * 0.42, Math.sin(t * 0.004 + st.phase) * 0.25, st.color);
+    });
+  };
+
   // Draw driver head pivoting at the neck with state-based nod reactions
   const drawRikshaHead = (ctx, bikeWidth, bikeHeight, state, mult = 1) => {
     const hImg = headImgRef.current;
@@ -894,15 +763,7 @@ export default function RikshaCanvas({
     }
 
     if (state === 'CRASHED') {
-      ctx.fillStyle = '#facc15';
-      for (let i = 0; i < 3; i++) {
-        const a = t * 0.006 + (i * Math.PI * 2) / 3;
-        const sx = Math.cos(a) * headW * 0.36;
-        const sy = -headH * 0.96 + Math.sin(a) * headH * 0.08;
-        ctx.beginPath();
-        ctx.arc(sx, sy, Math.max(2, headW * 0.045), 0, Math.PI * 2);
-        ctx.fill();
-      }
+      drawDizzyStars(ctx, -headW * 0.02, -headH * 0.96, headW * 0.95, t);
     }
 
     ctx.restore();
@@ -1725,28 +1586,6 @@ export default function RikshaCanvas({
     <div className="relative w-full h-full min-h-[160px] rounded-xl sm:rounded-2xl overflow-hidden shadow-[0_12px_36px_rgba(0,0,0,0.5)] select-none border border-white/10 bg-[#0a1520]">
       <canvas ref={canvasRef} className="w-full h-full block" />
 
-      {/* Dark wash + sunburst — crash HUD only so rickshaw stays visible while waiting */}
-      {state === 'CRASHED' && (
-        <div className="absolute inset-0 z-[9] pointer-events-none wait-stage-wash" aria-hidden>
-          <div
-            className="absolute inset-0"
-            style={{
-              background:
-                'radial-gradient(ellipse at center, rgba(18,20,24,0.72) 0%, rgba(8,10,14,0.88) 70%, rgba(5,8,12,0.94) 100%)'
-            }}
-          />
-          <div
-            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(100%,520px)] h-[min(100%,520px)] opacity-50"
-            style={{
-              background:
-                'repeating-conic-gradient(from 0deg, rgba(255,255,255,0.09) 0deg 7deg, transparent 7deg 14deg)',
-              maskImage: 'radial-gradient(circle, black 12%, transparent 62%)',
-              WebkitMaskImage: 'radial-gradient(circle, black 12%, transparent 62%)'
-            }}
-          />
-        </div>
-      )}
-
       {/* CENTER HUD */}
       <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none select-none z-10 pb-2 sm:pb-4">
         {state === 'WAITING' && (
@@ -1817,34 +1656,11 @@ export default function RikshaCanvas({
 
         {state === 'CRASHED' && (
           <div className="text-center flex flex-col items-center relative crash-impact">
-            <div className="pointer-events-none absolute inset-[-40%] crash-screen-flash rounded-full" />
-            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-56 h-32 bg-red-600/35 blur-3xl" />
-
-            <div className="relative mb-1.5 px-3 py-0.5 rounded-full border border-red-400/40 bg-black/50 backdrop-blur-sm">
-              <span
-                className="text-[10px] sm:text-[11px] font-black uppercase tracking-[0.28em] text-[#ff6b6b]"
-                style={{ textShadow: '0 0 12px rgba(239,68,68,0.8)' }}
-              >
-                WIPED OUT
-              </span>
-            </div>
-
             <span
               className="relative font-black text-[#ff3b3b] text-5xl sm:text-7xl leading-none crash-mult-pop"
-              style={{
-                fontFamily: "'Chakra Petch', sans-serif",
-                textShadow:
-                  '0 0 30px rgba(239,68,68,0.95), 0 0 60px rgba(255,80,40,0.45), 0 8px 18px rgba(0,0,0,0.95)'
-              }}
+              style={{ fontFamily: "'Chakra Petch', sans-serif" }}
             >
               {multiplier.toFixed(2)}x
-            </span>
-
-            <span
-              className="relative mt-2 text-[11px] sm:text-xs font-bold uppercase tracking-[0.2em] text-white/80"
-              style={{ textShadow: '0 2px 8px rgba(0,0,0,0.9)' }}
-            >
-              Round crashed
             </span>
           </div>
         )}
