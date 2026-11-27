@@ -2,6 +2,7 @@ package com.bulletrani.provider;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.bulletrani.config.AppProperties;
 import com.bulletrani.store.DataStore;
 import in.oreng.gamesdk.ProviderGameServerSDK;
@@ -10,6 +11,11 @@ import in.oreng.gamesdk.WalletOperationRequest;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -18,6 +24,7 @@ import java.util.UUID;
 public class ProviderWalletService {
   private final AppProperties props;
   private final DataStore db;
+  private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
   private volatile ProviderGameServerSDK sdk;
 
   public ProviderWalletService(AppProperties props, DataStore db) {
@@ -153,6 +160,136 @@ public class ProviderWalletService {
       }
     }
     return sdk;
+  }
+
+  public boolean isOperationsWalletConfigured() {
+    String u = props.getProvider().getOperationsUrl();
+    String k = props.getProvider().getInternalKey();
+    return u != null && !u.isBlank() && k != null && !k.isBlank();
+  }
+
+  /** Operations opType 2051: POST /api/v1/wallet/balance */
+  public Double operationsBalance(String token, String partnerCode) throws Exception {
+    JsonObject body = new JsonObject();
+    body.addProperty("token", token);
+    body.addProperty("partner_code", partnerCode);
+    JsonObject res = postOperations("/api/v1/wallet/balance", body);
+    if (res.has("status") && !res.get("status").getAsBoolean()) {
+      throw new IllegalStateException(res.has("message") ? res.get("message").getAsString() : "Balance fetch failed");
+    }
+    Double bal = readAmount(res);
+    if (bal == null && res.has("message") && !res.get("message").isJsonNull()) {
+      try { bal = res.get("message").getAsDouble(); } catch (Exception ignored) {}
+    }
+    return bal;
+  }
+
+  /** Operations opType 2052: POST /api/v1/wallet/credit-transfer (idempotent retries on timeout/502). */
+  public Map<String, Object> operationsCreditTransfer(
+      String token, String partnerCode, long gid, double bet, double win,
+      String gameType, String tranId, int ttype, String roundId) {
+    return operationsCreditTransfer(token, partnerCode, null, gid, bet, win, gameType, tranId, ttype, roundId);
+  }
+
+  public Map<String, Object> operationsCreditTransfer(
+      String token, String partnerCode, String userId, long gid, double bet, double win,
+      String gameType, String tranId, int ttype, String roundId) {
+    try {
+      JsonObject body = new JsonObject();
+      if (token != null && !token.isBlank()) body.addProperty("token", token);
+      if (partnerCode != null && !partnerCode.isBlank()) body.addProperty("partner_code", partnerCode);
+      if (userId != null && !userId.isBlank()) body.addProperty("user_id", userId);
+      body.addProperty("gid", gid);
+      body.addProperty("bet", bet);
+      body.addProperty("win", win);
+      body.addProperty("game_type", gameType != null && !gameType.isBlank() ? gameType : "spin");
+      body.addProperty("tranid", tranId);
+      body.addProperty("ttype", ttype);
+      body.addProperty("roundid", roundId);
+
+      JsonObject res = postOperations("/api/v1/wallet/credit-transfer", body);
+      boolean ok = res.has("status") && res.get("status").getAsBoolean();
+      Double bal = readAmount(res);
+      if (bal == null && ok && res.has("message") && !res.get("message").isJsonNull()) {
+        try { bal = res.get("message").getAsDouble(); } catch (Exception ignored) {}
+      }
+      String msg = !ok && res.has("message") && !res.get("message").isJsonNull()
+          ? res.get("message").getAsString() : null;
+      String code = res.has("code") && !res.get("code").isJsonNull()
+          ? res.get("code").getAsString() : null;
+
+      Map<String, Object> out = new LinkedHashMap<>();
+      out.put("success", ok);
+      if (bal != null) out.put("balance", bal);
+      if (msg != null) out.put("message", msg);
+      if (code != null) out.put("code", code);
+      if (isSessionExpiredError(code, msg)) out.put("sessionExpired", true);
+      out.put("raw", res.toString());
+      return out;
+    } catch (Exception e) {
+      Map<String, Object> fail = new LinkedHashMap<>();
+      fail.put("success", false);
+      fail.put("message", e.getMessage());
+      return fail;
+    }
+  }
+
+  /** Aborted-round refund (game_type: "refund", ttype: 2, unique refund tranid). */
+  public Map<String, Object> operationsRefund(
+      String token, String partnerCode, long gid, double bet, String roundId, String tranId) {
+    String refundTranId = (tranId != null && !tranId.isBlank())
+        ? tranId
+        : (gid + "-" + roundId + "-refund-" + UUID.randomUUID().toString().substring(0, 8));
+    return operationsCreditTransfer(token, partnerCode, null, gid, bet, 0, "refund", refundTranId, 2, roundId);
+  }
+
+  private static boolean isSessionExpiredError(String code, String msg) {
+    String combined = ((code != null ? code : "") + " " + (msg != null ? msg : "")).toUpperCase();
+    return combined.contains("ERR-0011") || combined.contains("ERR-0012") || combined.contains("ERR-0013");
+  }
+
+  private JsonObject postOperations(String path, JsonObject payload) throws Exception {
+    String rawUrl = props.getProvider().getOperationsUrl();
+    if (rawUrl == null || rawUrl.isBlank()) {
+      throw new IllegalStateException("OPERATIONS_API_URL is not configured");
+    }
+    String base = rawUrl.replaceAll("/+$", "");
+    String internalKey = props.getProvider().getInternalKey();
+    if (internalKey == null || internalKey.isBlank()) {
+      throw new IllegalStateException("INTERNAL_SERVICE_KEY is not configured");
+    }
+    HttpRequest req = HttpRequest.newBuilder()
+        .uri(URI.create(base + path))
+        .timeout(Duration.ofSeconds(15))
+        .header("Content-Type", "application/json")
+        .header("X-Internal-Key", internalKey)
+        .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
+        .build();
+
+    // Retry up to 3 times on network timeout / 502 / 503 / 504 using the exact same payload & tranid
+    Exception lastErr = null;
+    for (int attempt = 0; attempt < 3; attempt++) {
+      try {
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        int status = resp.statusCode();
+        if (status == 502 || status == 503 || status == 504) {
+          lastErr = new IllegalStateException("Operations HTTP " + status + ": " + resp.body());
+        } else if (status == 400) {
+          // Operator business refusal (status: false) — parse and return without retrying
+          return JsonParser.parseString(resp.body()).getAsJsonObject();
+        } else if (status >= 400) {
+          throw new IllegalStateException("Operations HTTP " + status + ": " + resp.body());
+        } else {
+          return JsonParser.parseString(resp.body()).getAsJsonObject();
+        }
+      } catch (java.io.IOException e) {
+        lastErr = e;
+      }
+      if (attempt < 2) {
+        Thread.sleep(500L * (attempt + 1));
+      }
+    }
+    throw lastErr != null ? lastErr : new IllegalStateException("Operations request failed");
   }
 
   public Double getBalance(String sessionToken) {

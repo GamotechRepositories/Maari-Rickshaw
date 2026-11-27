@@ -29,7 +29,7 @@ public class AppProperties {
 
   public static class Mongodb {
     private String uri = "";
-    private String database = "bullet_rani";
+    private String database = "";
 
     public String getUri() { return uri; }
     public void setUri(String uri) { this.uri = uri; }
@@ -40,11 +40,13 @@ public class AppProperties {
   public static class Provider {
     /** When true, bets debit/credit via Provider Game SDK instead of local wallet. */
     private boolean enabled = false;
-    private String apiUrl = "https://api.dpbossking.com/api/v1";
+    private String apiUrl = "";
     private String apiKey = "";
-    private String tableId = "bulletrani_main";
+    private String tableId = "";
     /** Must match admin panel game `code` / launch `gameCode`. */
-    private String gameCode = "BULLETRANI";
+    private String gameCode = "";
+    private String operationsUrl = "";
+    private String internalKey = "";
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -56,5 +58,9 @@ public class AppProperties {
     public void setTableId(String tableId) { this.tableId = tableId; }
     public String getGameCode() { return gameCode; }
     public void setGameCode(String gameCode) { this.gameCode = gameCode; }
+    public String getOperationsUrl() { return operationsUrl; }
+    public void setOperationsUrl(String operationsUrl) { this.operationsUrl = operationsUrl; }
+    public String getInternalKey() { return internalKey; }
+    public void setInternalKey(String internalKey) { this.internalKey = internalKey; }
   }
 }

@@ -14,6 +14,7 @@ import { sound } from './soundEngine';
 import {
   initProviderSession,
   getSessionToken,
+  getLaunchSessionParams,
   notifyRoundCreated,
   notifyRoundStarted,
   notifyRoundEnded
@@ -140,10 +141,15 @@ export default function App() {
           gameCode: session.gameCode
         }));
         try {
+          const launch = getLaunchSessionParams();
           const res = await fetch(`${API_BASE}/api/provider/balance`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionToken: getSessionToken() })
+            body: JSON.stringify({
+              sessionToken: getSessionToken(),
+              token: getSessionToken(),
+              partner_code: launch.partnerCode || session.operatorId
+            })
           });
           const data = await res.json();
           if (data.success && data.balance != null) {
@@ -454,6 +460,7 @@ export default function App() {
 
       <TopGunHeader
         username={user?.username || 'TopGunPilot'}
+        closeUrl={getLaunchSessionParams().closeUrl}
         onOpenProfile={() => setShowMenu(true)}
       />
 

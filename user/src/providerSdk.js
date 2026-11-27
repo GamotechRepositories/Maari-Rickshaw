@@ -12,7 +12,7 @@ import { ProviderGameSDK, ProviderSDKError } from '@gamotech/game-sdk-client';
  * Wallet debit/credit stays on the Java game server (never in browser).
  */
 
-const API_BASE = import.meta.env.VITE_PROVIDER_API_URL || 'https://api.dpbossking.com/api/v1';
+const API_BASE = import.meta.env.VITE_PROVIDER_API_URL || '';
 
 let sdk = null;
 let tableId = null;
@@ -26,8 +26,24 @@ export function isProviderReady() {
   return ready && !!sdk?.sessionToken;
 }
 
+export function getLaunchSessionParams(search = window.location.search) {
+  const params = new URLSearchParams(search);
+  return {
+    token: params.get('token') || params.get('sessionToken'),
+    partnerCode: params.get('partner_code'),
+    gid: params.get('gid'),
+    gameCode: params.get('game_code'),
+    username: params.get('username'),
+    userId: params.get('user_id'),
+    currency: params.get('currency') || 'INR',
+    lang: params.get('lang') || 'en',
+    extsess: params.get('extsess'),
+    closeUrl: params.get('close_url')
+  };
+}
+
 export function getSessionToken() {
-  return sdk?.sessionToken || null;
+  return sdk?.sessionToken || getLaunchSessionParams().token || null;
 }
 
 export function getProviderTableId() {
@@ -35,7 +51,7 @@ export function getProviderTableId() {
 }
 
 export function hasLaunchSessionToken(search = window.location.search) {
-  return !!new URLSearchParams(search).get('sessionToken');
+  return !!getLaunchSessionParams(search).token;
 }
 
 /**
@@ -46,7 +62,8 @@ export function hasLaunchSessionToken(search = window.location.search) {
  * >}
  */
 export async function initProviderSession() {
-  const launchedWithToken = hasLaunchSessionToken();
+  const launch = getLaunchSessionParams();
+  const launchedWithToken = !!launch.token;
   sdk = new ProviderGameSDK({ apiBaseUrl: API_BASE });
 
   if (!launchedWithToken) {
@@ -56,8 +73,23 @@ export async function initProviderSession() {
   }
 
   try {
-    // 1) Validate session (required first step — do not trust URL for player/operator ids)
-    const session = await sdk.initFromUrl();
+    // 1) Validate session (supports both ?token=... from Game Developer Guide and ?sessionToken=...)
+    const hasSessionTokenParam = !!new URLSearchParams(window.location.search).get('sessionToken');
+    const validated = hasSessionTokenParam
+      ? await sdk.initFromUrl()
+      : typeof sdk.validateSession === 'function'
+        ? await sdk.validateSession(launch.token)
+        : await sdk.initFromUrl(`?sessionToken=${encodeURIComponent(launch.token)}`);
+    const session = {
+      ...launch,
+      ...(validated || {}),
+      playerUsername: validated?.playerUsername || launch.username,
+      playerId: validated?.playerId || launch.userId,
+      operatorId: validated?.operatorId || launch.partnerCode,
+      gameCode: validated?.gameCode || launch.gameCode,
+      currency: validated?.currency || launch.currency,
+      language: validated?.language || launch.lang
+    };
     sdk.attachUnloadHandler();
 
     // 2) TABLE_CREATED after local table setup
@@ -132,6 +164,15 @@ export async function notifyRoundEnded(roundNumber, payload = {}) {
     });
   } catch (e) {
     console.warn('[provider] ROUND_ENDED failed', e);
+  }
+}
+
+export function exitGame(closeUrl) {
+  if (!closeUrl) return window.close();
+  try {
+    (window.top || window).location.href = closeUrl;
+  } catch {
+    window.location.href = closeUrl;
   }
 }
 

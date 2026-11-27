@@ -1,16 +1,33 @@
 import React from 'react';
 import { IconChevronLeft } from './Icons';
+import { exitGame } from '../providerSdk';
 
 export default function TopGunHeader({
   username = 'TopGunPilot',
+  closeUrl = null,
   onOpenProfile
 }) {
+  const handleExit = () => {
+    exitGame(closeUrl);
+  };
+
   return (
     <header className="w-full h-8 sm:h-9 bg-[#0a1115] border-b border-white/10 px-2.5 sm:px-4 flex items-center justify-between select-none z-30 shrink-0 safe-top">
-      <div className="flex items-center gap-1 text-white/90 font-semibold text-xs sm:text-sm tracking-tight">
-        <IconChevronLeft className="w-3.5 h-3.5 text-white/70" />
-        <span>Rocket Rickshaw</span>
-      </div>
+      {closeUrl ? (
+        <button
+          onClick={handleExit}
+          className="flex items-center gap-1 text-white/90 hover:text-white font-semibold text-xs sm:text-sm tracking-tight cursor-pointer"
+          aria-label="Back to lobby"
+        >
+          <IconChevronLeft className="w-3.5 h-3.5 text-white/70" />
+          <span>Rocket Rickshaw</span>
+        </button>
+      ) : (
+        <div className="flex items-center gap-1 text-white/90 font-semibold text-xs sm:text-sm tracking-tight">
+          <IconChevronLeft className="w-3.5 h-3.5 text-white/70" />
+          <span>Rocket Rickshaw</span>
+        </div>
+      )}
 
       <button
         onClick={onOpenProfile}
