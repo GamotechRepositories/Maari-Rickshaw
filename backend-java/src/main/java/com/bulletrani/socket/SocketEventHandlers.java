@@ -54,7 +54,9 @@ public class SocketEventHandlers {
         Double auto = data.get("autoCashout") == null || "null".equals(String.valueOf(data.get("autoCashout")))
             ? null : Double.parseDouble(String.valueOf(data.get("autoCashout")));
         String sessionToken = readSessionToken(data);
-        Map<String, Object> result = engine.placeBet(userId, panelId, amount, auto, sessionToken);
+        String partnerCode = readStr(data, "partnerCode", "partner_code");
+        long gid = readLong(data, "gid");
+        Map<String, Object> result = engine.placeBet(userId, panelId, amount, auto, sessionToken, partnerCode, gid);
         if (ack.isAckRequested()) ack.sendAckData(result);
       } catch (Exception e) {
         if (ack.isAckRequested()) {
@@ -69,7 +71,9 @@ public class SocketEventHandlers {
       try {
         int panelId = Integer.parseInt(String.valueOf(data.get("panelId")));
         String sessionToken = readSessionToken(data);
-        Map<String, Object> result = engine.cancelBet(userId, panelId, sessionToken);
+        String partnerCode = readStr(data, "partnerCode", "partner_code");
+        long gid = readLong(data, "gid");
+        Map<String, Object> result = engine.cancelBet(userId, panelId, sessionToken, partnerCode, gid);
         if (ack.isAckRequested()) ack.sendAckData(result);
       } catch (Exception e) {
         if (ack.isAckRequested()) {
@@ -168,9 +172,23 @@ public class SocketEventHandlers {
   }
 
   private static String readSessionToken(Map data) {
-    if (data == null || data.get("sessionToken") == null) return null;
-    String t = String.valueOf(data.get("sessionToken"));
-    if (t.isBlank() || "null".equalsIgnoreCase(t)) return null;
-    return t;
+    return readStr(data, "sessionToken", "token");
+  }
+
+  private static String readStr(Map data, String... keys) {
+    if (data == null) return null;
+    for (String k : keys) {
+      Object v = data.get(k);
+      if (v == null) continue;
+      String t = String.valueOf(v).trim();
+      if (!t.isBlank() && !"null".equalsIgnoreCase(t)) return t;
+    }
+    return null;
+  }
+
+  private static long readLong(Map data, String key) {
+    String s = readStr(data, key);
+    if (s == null) return 0L;
+    try { return Long.parseLong(s); } catch (NumberFormatException ignored) { return 0L; }
   }
 }

@@ -125,7 +125,17 @@ export default function App() {
         return;
       }
 
-      if (result.mode === 'provider') {
+      if (result.mode === 'operations') {
+        setProviderMode(true);
+        if (result.gameJwt) setToken(result.gameJwt);
+        if (result.user) {
+          setUser((prev) => ({
+            ...(prev || {}),
+            ...result.user,
+            balance: result.balance != null ? result.balance : (result.user.balance ?? prev?.balance ?? 0)
+          }));
+        }
+      } else if (result.mode === 'provider') {
         const session = result.session;
         setProviderMode(true);
         // Use validate response only — never trust operatorId/playerId from URL
@@ -351,6 +361,17 @@ export default function App() {
       .catch(() => { });
   }, [gameState]);
 
+  // Halt wagering if session expired (ERR-0011 / 0012 / 0013) and prompt return to close_url
+  const haltIfSessionExpired = (res) => {
+    const msg = res?.message || res?.error || '';
+    if (res?.sessionExpired || /ERR-001[123]|session.*(expired|invalid|closed)/i.test(msg)) {
+      setSessionError(msg || 'Session expired. Please return to your operator lobby.');
+      setBootState('blocked');
+      return true;
+    }
+    return false;
+  };
+
   // Betting Actions
   const handlePlaceBet = (panelId, amount, autoCashout) => {
     if (!socket || !user) {
@@ -358,11 +379,14 @@ export default function App() {
       return;
     }
 
+    const launch = getLaunchSessionParams();
     socket.emit('bet:place', {
       panelId,
       amount,
       autoCashout,
-      sessionToken: getSessionToken()
+      sessionToken: getSessionToken(),
+      partnerCode: launch.partnerCode,
+      gid: launch.gid
     }, (res) => {
       if (res && res.success) {
         setActiveBets(prev => ({
@@ -379,7 +403,7 @@ export default function App() {
         if (res.newBalance != null) {
           setUser(prev => ({ ...prev, balance: res.newBalance }));
         }
-      } else {
+      } else if (!haltIfSessionExpired(res)) {
         showToast(res?.message || 'Failed to place bet', 'error');
       }
     });
@@ -387,9 +411,12 @@ export default function App() {
 
   const handleCancelBet = (panelId) => {
     if (!socket || !user) return;
+    const launch = getLaunchSessionParams();
     socket.emit('bet:cancel', {
       panelId,
-      sessionToken: getSessionToken()
+      sessionToken: getSessionToken(),
+      partnerCode: launch.partnerCode,
+      gid: launch.gid
     }, (res) => {
       if (res && res.success) {
         setActiveBets(prev => {
@@ -400,7 +427,7 @@ export default function App() {
         if (res.newBalance != null) {
           setUser(prev => ({ ...prev, balance: res.newBalance }));
         }
-      } else if (res?.message) {
+      } else if (res?.message && !haltIfSessionExpired(res)) {
         showToast(res.message, 'error');
       }
     });
@@ -410,6 +437,12 @@ export default function App() {
     if (!socket || !user) return;
     socket.emit('bet:cashout', {
       panelId,
+    }, (res) => {
+      if (res && !res.success) {
+        if (!haltIfSessionExpired(res) && res.message) {
+          showToast(res.message, 'error');
+        }
+      }
     });
   };
 
@@ -445,7 +478,7 @@ export default function App() {
   }
 
   if (bootState === 'blocked') {
-    return <SessionGate message={sessionError} />;
+    return <SessionGate message={sessionError} closeUrl={getLaunchSessionParams().closeUrl} />;
   }
 
   return (

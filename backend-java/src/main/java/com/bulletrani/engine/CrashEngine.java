@@ -87,7 +87,54 @@ public class CrashEngine {
   @PreDestroy
   public void shutdown() {
     cancelTimers();
+    refundActiveBets("Server shutdown");
     scheduler.shutdownNow();
+  }
+
+  /** Refund all active real-player bets if a round is aborted after debit (ttype: 2, game_type: "refund"). */
+  public synchronized void refundActiveBets(String reason) {
+    if (currentRound == null || activeBets.isEmpty()) return;
+    String roundId = String.valueOf(currentRound.roundNumber);
+    for (Map.Entry<String, ActiveBet> e : new ArrayList<>(activeBets.entrySet())) {
+      ActiveBet bet = e.getValue();
+      if (bet.isBot || !"active".equals(bet.status)) continue;
+      try {
+        if (provider.isOperationsWalletConfigured() && bet.sessionToken != null && !bet.sessionToken.isBlank()
+            && bet.partnerCode != null && !bet.partnerCode.isBlank()) {
+          String refundTranId = bet.gid + "-" + roundId + "-refund-" + bet.id;
+          Map<String, Object> refund = provider.operationsRefund(
+              bet.sessionToken, bet.partnerCode, bet.gid, bet.betAmount, roundId, refundTranId);
+          if (Boolean.TRUE.equals(refund.get("success"))) {
+            bet.status = "cancelled";
+            if (bet.id instanceof Number) db.markBet(((Number) bet.id).longValue(), "cancelled");
+            Object bal = refund.get("balance");
+            if (bal instanceof Number) {
+              double authBal = ((Number) bal).doubleValue();
+              db.updateBalance(bet.userId, authBal);
+              bus.emitToUser(bet.userId, "wallet:updated", Map.of("balance", authBal));
+            }
+          }
+        } else if (provider.isEnabled() && bet.sessionToken != null && !bet.sessionToken.isBlank()) {
+          Map<String, Object> credit = provider.credit(
+              bet.sessionToken, bet.betAmount, ProviderWalletService.newTxId("refund"), roundId, provider.tableId());
+          if (Boolean.TRUE.equals(credit.get("success"))) {
+            bet.status = "cancelled";
+            if (bet.id instanceof Number) db.markBet(((Number) bet.id).longValue(), "cancelled");
+          }
+        } else {
+          User u = db.findById(bet.userId);
+          if (u != null) {
+            double newBal = DataStore.round2(u.balance + bet.betAmount);
+            db.updateBalance(bet.userId, newBal);
+            db.insertTx(bet.userId, "deposit", bet.betAmount, newBal,
+                "Aborted round refund (" + reason + ") #" + currentRound.roundNumber);
+            bet.status = "cancelled";
+            if (bet.id instanceof Number) db.markBet(((Number) bet.id).longValue(), "cancelled");
+            bus.emitToUser(bet.userId, "wallet:updated", Map.of("balance", newBal));
+          }
+        }
+      } catch (Exception ignored) {}
+    }
   }
 
   private Map<String, Object> roundHistoryMap(GameRound r) {
@@ -227,21 +274,27 @@ public class CrashEngine {
     cancelTick();
     tickFuture = scheduler.scheduleAtFixedRate(() -> {
       if (paused) return;
-      long elapsed = System.currentTimeMillis() - roundStartTime;
-      double elapsedSec = elapsed / 1000.0;
-      double calculated = 1.00 + (Math.exp(0.065 * elapsedSec) - 1) + (0.015 * elapsedSec * elapsedSec);
-      currentMultiplier = DataStore.round2(calculated);
-      Double target = getCrashTarget();
-      if (target != null && currentMultiplier >= target) {
+      try {
+        long elapsed = System.currentTimeMillis() - roundStartTime;
+        double elapsedSec = elapsed / 1000.0;
+        double calculated = 1.00 + (Math.exp(0.065 * elapsedSec) - 1) + (0.015 * elapsedSec * elapsedSec);
+        currentMultiplier = DataStore.round2(calculated);
+        Double target = getCrashTarget();
+        if (target != null && currentMultiplier >= target) {
+          cancelTick();
+          crashFlight(target);
+          return;
+        }
+        processAutoCashouts(currentMultiplier);
+        Map<String, Object> tick = new LinkedHashMap<>();
+        tick.put("multiplier", currentMultiplier);
+        tick.put("elapsedMs", elapsed);
+        bus.emit("round:tick", tick);
+      } catch (Exception err) {
         cancelTick();
-        crashFlight(target);
-        return;
+        refundActiveBets("Engine exception: " + err.getMessage());
+        prepareNewRound();
       }
-      processAutoCashouts(currentMultiplier);
-      Map<String, Object> tick = new LinkedHashMap<>();
-      tick.put("multiplier", currentMultiplier);
-      tick.put("elapsedMs", elapsed);
-      bus.emit("round:tick", tick);
     }, 0, 35, TimeUnit.MILLISECONDS);
   }
 
@@ -346,14 +399,25 @@ public class CrashEngine {
     double winAmount = DataStore.round2(bet.betAmount * cashoutMultiplier);
     if (winAmount > maxPayout) winAmount = maxPayout;
 
+    Double settledBalance = null;
+    if (!bet.isBot && bet.id instanceof Number) {
+      // Never reveal cashout/win outcome until credit-transfer returns status: true
+      Map<String, Object> settled = settleWin(bet, winAmount, cashoutMultiplier);
+      if (!Boolean.TRUE.equals(settled.get("success"))) {
+        fail.put("success", false);
+        fail.put("message", String.valueOf(settled.getOrDefault("message", "Wallet credit transfer failed")));
+        if (Boolean.TRUE.equals(settled.get("sessionExpired"))) fail.put("sessionExpired", true);
+        return fail;
+      }
+      if (settled.get("balance") instanceof Number) {
+        settledBalance = ((Number) settled.get("balance")).doubleValue();
+      }
+      db.cashoutBetDb(((Number) bet.id).longValue(), cashoutMultiplier, winAmount);
+    }
+
     bet.status = "cashed_out";
     bet.cashoutMultiplier = cashoutMultiplier;
     bet.winAmount = winAmount;
-
-    if (!bet.isBot && bet.id instanceof Number) {
-      db.cashoutBetDb(((Number) bet.id).longValue(), cashoutMultiplier, winAmount);
-      settleWin(bet, winAmount, cashoutMultiplier);
-    }
 
     Map<String, Object> evt = new LinkedHashMap<>();
     evt.put("betId", bet.id);
@@ -369,6 +433,7 @@ public class CrashEngine {
     ok.put("success", true);
     ok.put("multiplier", cashoutMultiplier);
     ok.put("winAmount", winAmount);
+    if (settledBalance != null) ok.put("newBalance", settledBalance);
     return ok;
   }
 
@@ -426,6 +491,11 @@ public class CrashEngine {
   }
 
   public synchronized Map<String, Object> placeBet(long userId, int panelId, double amount, Double autoCashout, String sessionToken) {
+    return placeBet(userId, panelId, amount, autoCashout, sessionToken, null, 0L);
+  }
+
+  public synchronized Map<String, Object> placeBet(long userId, int panelId, double amount, Double autoCashout,
+                                                   String sessionToken, String partnerCode, long gid) {
     Map<String, Object> fail = new LinkedHashMap<>();
     if (paused) { fail.put("success", false); fail.put("message", "Game is paused by admin"); return fail; }
     if (!"WAITING".equals(state)) { fail.put("success", false); fail.put("message", "Bets are only accepted during countdown"); return fail; }
@@ -448,11 +518,26 @@ public class CrashEngine {
     if (user == null) { fail.put("success", false); fail.put("message", "User not found"); return fail; }
     if (user.isBanned != 0) { fail.put("success", false); fail.put("message", "Account suspended"); return fail; }
 
-    boolean useProvider = provider.isEnabled() && sessionToken != null && !sessionToken.isBlank();
+    boolean useOperations = provider.isOperationsWalletConfigured()
+        && sessionToken != null && !sessionToken.isBlank()
+        && partnerCode != null && !partnerCode.isBlank();
+    boolean useProvider = !useOperations && provider.isEnabled() && sessionToken != null && !sessionToken.isBlank();
     String debitTxId = null;
     Double providerBalance = null;
 
-    if (useProvider) {
+    if (useOperations) {
+      debitTxId = gid + "-" + currentRound.roundNumber + "-" + panelId + "-" + System.currentTimeMillis();
+      Map<String, Object> debit = provider.operationsCreditTransfer(
+          sessionToken, partnerCode, gid, amount, 0, "spin", debitTxId, 1, String.valueOf(currentRound.roundNumber));
+      if (!Boolean.TRUE.equals(debit.get("success"))) {
+        fail.put("success", false);
+        fail.put("message", String.valueOf(debit.getOrDefault("message", "Operations bet debit failed")));
+        if (Boolean.TRUE.equals(debit.get("sessionExpired"))) fail.put("sessionExpired", true);
+        return fail;
+      }
+      Object bal = debit.get("balance");
+      if (bal instanceof Number) providerBalance = ((Number) bal).doubleValue();
+    } else if (useProvider) {
       debitTxId = ProviderWalletService.newTxId("bet");
       Map<String, Object> debit = provider.debit(
           sessionToken, amount, debitTxId,
@@ -474,8 +559,8 @@ public class CrashEngine {
     }
 
     Double parsedAuto = (autoCashout != null && autoCashout >= 1.01) ? DataStore.round2(autoCashout) : null;
-    String walletSource = useProvider ? provider.providerId() : "local";
-    String providerCode = useProvider ? provider.gameCode() : null;
+    String walletSource = useOperations ? "operations" : (useProvider ? provider.providerId() : "local");
+    String providerCode = (useOperations || useProvider) ? provider.gameCode() : null;
     Bet saved = db.insertBet(currentRound.id, userId, panelId, amount, parsedAuto, walletSource, providerCode);
 
     ActiveBet bet = new ActiveBet();
@@ -489,7 +574,9 @@ public class CrashEngine {
     bet.status = "active";
     bet.isBot = false;
     bet.winAmount = 0;
-    bet.sessionToken = useProvider ? sessionToken : null;
+    bet.sessionToken = (useOperations || useProvider) ? sessionToken : null;
+    bet.partnerCode = useOperations ? partnerCode : null;
+    bet.gid = useOperations ? gid : 0L;
     bet.debitTxId = debitTxId;
     activeBets.put(key, bet);
 
@@ -512,6 +599,11 @@ public class CrashEngine {
   }
 
   public synchronized Map<String, Object> cancelBet(long userId, int panelId, String sessionToken) {
+    return cancelBet(userId, panelId, sessionToken, null, 0L);
+  }
+
+  public synchronized Map<String, Object> cancelBet(long userId, int panelId, String sessionToken,
+                                                    String partnerCode, long gid) {
     Map<String, Object> fail = new LinkedHashMap<>();
     if (!"WAITING".equals(state)) { fail.put("success", false); fail.put("message", "Can only cancel during countdown"); return fail; }
     String key = userId + "_" + panelId;
@@ -521,8 +613,20 @@ public class CrashEngine {
     }
 
     String token = bet.sessionToken != null ? bet.sessionToken : sessionToken;
+    String pCode = bet.partnerCode != null ? bet.partnerCode : partnerCode;
+    long effectiveGid = bet.gid > 0 ? bet.gid : gid;
     Double newBalance = null;
-    if (provider.isEnabled() && token != null && !token.isBlank()) {
+    if (provider.isOperationsWalletConfigured() && token != null && !token.isBlank() && pCode != null && !pCode.isBlank()) {
+      Map<String, Object> refund = provider.operationsRefund(
+          token, pCode, effectiveGid, bet.betAmount, String.valueOf(currentRound.roundNumber), null);
+      if (!Boolean.TRUE.equals(refund.get("success"))) {
+        fail.put("success", false);
+        fail.put("message", String.valueOf(refund.getOrDefault("message", "Operations refund failed")));
+        return fail;
+      }
+      Object bal = refund.get("balance");
+      if (bal instanceof Number) newBalance = ((Number) bal).doubleValue();
+    } else if (provider.isEnabled() && token != null && !token.isBlank()) {
       Map<String, Object> credit = provider.credit(
           token, bet.betAmount, ProviderWalletService.newTxId("refund"),
           String.valueOf(currentRound.roundNumber), provider.tableId());
@@ -550,25 +654,45 @@ public class CrashEngine {
     return ok;
   }
 
-  private void settleWin(ActiveBet bet, double winAmount, double cashoutMultiplier) {
+  private Map<String, Object> settleWin(ActiveBet bet, double winAmount, double cashoutMultiplier) {
     String token = bet.sessionToken;
+    if (provider.isOperationsWalletConfigured() && token != null && !token.isBlank()
+        && bet.partnerCode != null && !bet.partnerCode.isBlank()) {
+      String winTranId = bet.gid + "-" + currentRound.roundNumber + "-" + bet.panelId + "-win-" + System.currentTimeMillis();
+      Map<String, Object> credit = provider.operationsCreditTransfer(
+          token, bet.partnerCode, bet.gid, 0, winAmount, "spin", winTranId, 1, String.valueOf(currentRound.roundNumber));
+      if (!Boolean.TRUE.equals(credit.get("success"))) {
+        return credit;
+      }
+      Object bal = credit.get("balance");
+      if (bal instanceof Number) {
+        double authBal = ((Number) bal).doubleValue();
+        db.updateBalance(bet.userId, authBal);
+        bus.emitToUser(bet.userId, "wallet:updated", Map.of("balance", authBal));
+      }
+      return credit;
+    }
     if (provider.isEnabled() && token != null && !token.isBlank()) {
       Map<String, Object> credit = provider.credit(
           token, winAmount, ProviderWalletService.newTxId("win"),
           String.valueOf(currentRound.roundNumber), provider.tableId());
+      if (!Boolean.TRUE.equals(credit.get("success"))) {
+        return credit;
+      }
       Object bal = credit.get("balance");
       if (bal instanceof Number) {
         bus.emitToUser(bet.userId, "wallet:updated", Map.of("balance", ((Number) bal).doubleValue()));
       }
-      return;
+      return credit;
     }
     User user = db.findById(bet.userId);
-    if (user == null) return;
+    if (user == null) return Map.of("success", false, "message", "User not found");
     double newBalance = DataStore.round2(user.balance + winAmount);
     db.updateBalance(bet.userId, newBalance);
     db.insertTx(bet.userId, "win", winAmount, newBalance,
         "Aviator Win @ " + cashoutMultiplier + "x (Round #" + currentRound.roundNumber + ")");
     bus.emitToUser(bet.userId, "wallet:updated", Map.of("balance", newBalance));
+    return Map.of("success", true, "balance", newBalance);
   }
 
   public Double getCrashTarget() {

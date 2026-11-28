@@ -157,6 +157,23 @@ public class DataStore {
     return createUserInternal(username, email, password, balance, role);
   }
 
+  /** Finds or creates a MongoDB player record for an operator-launched user. */
+  public synchronized User findOrCreateProviderUser(String partnerCode, String externalUserId, String username) {
+    String cleanPartner = (partnerCode != null && !partnerCode.isBlank()) ? partnerCode.trim().toUpperCase(Locale.ROOT) : "OP";
+    String cleanExt = (externalUserId != null && !externalUserId.isBlank()) ? externalUserId.trim() : (username != null ? username.trim() : "guest");
+    String syntheticEmail = ("op_" + cleanPartner + "_" + cleanExt + "@provider.local").toLowerCase(Locale.ROOT);
+    User existing = mongo.findOne(Query.query(Criteria.where("email").is(syntheticEmail)), User.class);
+    String display = (username != null && !username.isBlank()) ? username.trim() : cleanExt;
+    if (existing != null) {
+      if (!display.equals(existing.username)) {
+        existing.username = display;
+        mongo.save(existing);
+      }
+      return existing;
+    }
+    return createUserInternal(display, syntheticEmail, UUID.randomUUID().toString(), 0, "player");
+  }
+
   private User createUserInternal(String username, String email, String password, double balance, String role) {
     User u = new User();
     u.id = next("users");

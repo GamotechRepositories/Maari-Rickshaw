@@ -12,7 +12,9 @@ public class ActiveBet {
   public boolean isBot;
   public double winAmount;
   public Double cashoutMultiplier;
-  /** Provider session token — when set, settle via Provider Game SDK wallet. */
+  /** Provider session token — when set, settle via Provider / Operations wallet. */
   public String sessionToken;
+  public String partnerCode;
+  public long gid;
   public String debitTxId;
 }

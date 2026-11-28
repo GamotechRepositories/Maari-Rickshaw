@@ -1,4 +1,5 @@
 import { ProviderGameSDK, ProviderSDKError } from '@gamotech/game-sdk-client';
+import { API_BASE as GAME_API_BASE } from './config';
 
 /**
  * Phase 3 — Game client (Provider Integration Guide)
@@ -57,29 +58,68 @@ export function hasLaunchSessionToken(search = window.location.search) {
 /**
  * @returns {Promise<
  *   | { mode: 'local' }
+ *   | { mode: 'operations', session: object, gameJwt: string, user: object, balance: number }
  *   | { mode: 'provider', session: object, tableId: string }
- *   | { mode: 'error', error: string, status?: number }
+ *   | { mode: 'error', error: string, status?: number, closeUrl?: string }
  * >}
  */
 export async function initProviderSession() {
   const launch = getLaunchSessionParams();
-  const launchedWithToken = !!launch.token;
-  sdk = new ProviderGameSDK({ apiBaseUrl: API_BASE });
-
-  if (!launchedWithToken) {
+  if (!launch.token) {
     ready = false;
     sdk = null;
     return { mode: 'local' };
   }
 
+  // Operations Launch & Boot flow (?token=...&partner_code=...&gid=...)
+  // Never calls /api/v1/wallet/* from the browser — forwards token to our game backend.
+  const isLegacySdk = !!new URLSearchParams(window.location.search).get('sessionToken') && !!API_BASE;
+  if (!isLegacySdk) {
+    try {
+      const res = await fetch(`${GAME_API_BASE}/api/provider/boot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: launch.token,
+          partner_code: launch.partnerCode,
+          gid: launch.gid,
+          game_code: launch.gameCode,
+          username: launch.username,
+          user_id: launch.userId,
+          currency: launch.currency,
+          lang: launch.lang,
+          extsess: launch.extsess
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.success) {
+        return {
+          mode: 'error',
+          error: friendlySessionError(data?.error || 'Session validation failed', res.status),
+          status: res.status,
+          closeUrl: launch.closeUrl
+        };
+      }
+      return {
+        mode: 'operations',
+        session: launch,
+        gameJwt: data.token,
+        user: data.user,
+        balance: data.balance
+      };
+    } catch (err) {
+      return {
+        mode: 'error',
+        error: err?.message || 'Unable to connect to game server.',
+        closeUrl: launch.closeUrl
+      };
+    }
+  }
+
+  sdk = new ProviderGameSDK({ apiBaseUrl: API_BASE });
   try {
-    // 1) Validate session (supports both ?token=... from Game Developer Guide and ?sessionToken=...)
-    const hasSessionTokenParam = !!new URLSearchParams(window.location.search).get('sessionToken');
-    const validated = hasSessionTokenParam
-      ? await sdk.initFromUrl()
-      : typeof sdk.validateSession === 'function'
-        ? await sdk.validateSession(launch.token)
-        : await sdk.initFromUrl(`?sessionToken=${encodeURIComponent(launch.token)}`);
+    // Legacy @gamotech/game-sdk-client flow (?sessionToken=...)
+    const validated = await sdk.initFromUrl();
     const session = {
       ...launch,
       ...(validated || {}),
@@ -92,7 +132,6 @@ export async function initProviderSession() {
     };
     sdk.attachUnloadHandler();
 
-    // 2) TABLE_CREATED after local table setup
     tableId = await sdk.createTable({
       tableId: `bulletrani_${Date.now()}`,
       game: session.gameCode || 'BULLETRANI'
@@ -107,8 +146,7 @@ export async function initProviderSession() {
 
     const message = err?.message || 'Session invalid';
     const status = err?.status;
-    // Token was present but validation/events failed → block gameplay
-    return { mode: 'error', error: friendlySessionError(message, status), status };
+    return { mode: 'error', error: friendlySessionError(message, status), status, closeUrl: launch.closeUrl };
   }
 }
 

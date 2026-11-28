@@ -177,10 +177,7 @@ public class ProviderWalletService {
     if (res.has("status") && !res.get("status").getAsBoolean()) {
       throw new IllegalStateException(res.has("message") ? res.get("message").getAsString() : "Balance fetch failed");
     }
-    Double bal = readAmount(res);
-    if (bal == null && res.has("message") && !res.get("message").isJsonNull()) {
-      try { bal = res.get("message").getAsDouble(); } catch (Exception ignored) {}
-    }
+    Double bal = readAuthoritativeBalance(res);
     return bal;
   }
 
@@ -209,10 +206,7 @@ public class ProviderWalletService {
 
       JsonObject res = postOperations("/api/v1/wallet/credit-transfer", body);
       boolean ok = res.has("status") && res.get("status").getAsBoolean();
-      Double bal = readAmount(res);
-      if (bal == null && ok && res.has("message") && !res.get("message").isJsonNull()) {
-        try { bal = res.get("message").getAsDouble(); } catch (Exception ignored) {}
-      }
+      Double bal = ok ? readAuthoritativeBalance(res) : null;
       String msg = !ok && res.has("message") && !res.get("message").isJsonNull()
           ? res.get("message").getAsString() : null;
       String code = res.has("code") && !res.get("code").isJsonNull()
@@ -243,6 +237,20 @@ public class ProviderWalletService {
     return operationsCreditTransfer(token, partnerCode, null, gid, bet, 0, "refund", refundTranId, 2, roundId);
   }
 
+  /** Authoritative Float balance from Operations 2051/2052 (prioritize `message` field). */
+  private static Double readAuthoritativeBalance(JsonObject res) {
+    if (res == null) return null;
+    if (res.has("message") && !res.get("message").isJsonNull()) {
+      try {
+        if (res.get("message").isJsonPrimitive() && (res.get("message").getAsJsonPrimitive().isNumber()
+            || res.get("message").getAsString().matches("^-?\\d+(\\.\\d+)?$"))) {
+          return Double.parseDouble(res.get("message").getAsString().trim());
+        }
+      } catch (Exception ignored) {}
+    }
+    return readAmount(res);
+  }
+
   private static boolean isSessionExpiredError(String code, String msg) {
     String combined = ((code != null ? code : "") + " " + (msg != null ? msg : "")).toUpperCase();
     return combined.contains("ERR-0011") || combined.contains("ERR-0012") || combined.contains("ERR-0013");
@@ -266,21 +274,25 @@ public class ProviderWalletService {
         .POST(HttpRequest.BodyPublishers.ofString(payload.toString()))
         .build();
 
-    // Retry up to 3 times on network timeout / 502 / 503 / 504 using the exact same payload & tranid
+    // Retry up to 3 times on network timeout / 502 / 503 / 504 / ERR-0020 / ERR-0021 using the exact same payload & tranid
     Exception lastErr = null;
     for (int attempt = 0; attempt < 3; attempt++) {
       try {
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         int status = resp.statusCode();
-        if (status == 502 || status == 503 || status == 504) {
-          lastErr = new IllegalStateException("Operations HTTP " + status + ": " + resp.body());
+        String bodyStr = resp.body() != null ? resp.body() : "";
+        String upper = bodyStr.toUpperCase();
+        boolean isRetryableErr = status == 502 || status == 503 || status == 504
+            || upper.contains("ERR-0020") || upper.contains("ERR-0021");
+        if (isRetryableErr) {
+          lastErr = new IllegalStateException("Operations HTTP " + status + ": " + bodyStr);
         } else if (status == 400) {
           // Operator business refusal (status: false) — parse and return without retrying
-          return JsonParser.parseString(resp.body()).getAsJsonObject();
+          return JsonParser.parseString(bodyStr).getAsJsonObject();
         } else if (status >= 400) {
-          throw new IllegalStateException("Operations HTTP " + status + ": " + resp.body());
+          throw new IllegalStateException("Operations HTTP " + status + ": " + bodyStr);
         } else {
-          return JsonParser.parseString(resp.body()).getAsJsonObject();
+          return JsonParser.parseString(bodyStr).getAsJsonObject();
         }
       } catch (java.io.IOException e) {
         lastErr = e;
